@@ -22,6 +22,7 @@ use glutin::window::WindowId;
 use log::{debug, error, info, warn};
 #[cfg(all(feature = "wayland", not(any(target_os = "macos", windows))))]
 use wayland_client::{Display as WaylandDisplay, EventQueue};
+use native_dialog::{MessageDialog, MessageType};
 
 use crossfont::{self, Size};
 
@@ -755,13 +756,45 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             self.write_to_pty(text.replace('\x1b', "").into_bytes());
             self.write_to_pty(&b"\x1b[201~"[..]);
         } else {
+            // Settings
+            const PASTE_LONG_THRESHOLD: usize = 4096;
+            const PASTE_TRUNCATE_THRESHOLD: usize = 1024;
+
+            let text_filtered = text.replace("\r\n", "\r").replace('\n', "\r");
+            let text_len = text_filtered.len();
+            let paste_long = text_len > PASTE_LONG_THRESHOLD;
+            let paste_dangerous = text_filtered.contains("\r");
+            let mut text_dialog = text_filtered.replace('\r', "\n");
+            // Don't truncate if only a bit over the limit to avoid "foo ba... (1 bytes hidden)"
+            if text_len > PASTE_TRUNCATE_THRESHOLD + 16 {
+                text_dialog.truncate(PASTE_TRUNCATE_THRESHOLD);
+                text_dialog += &format!("... ({} bytes hidden)", text_len - PASTE_TRUNCATE_THRESHOLD);
+            }
+
+            if paste_long || paste_dangerous {
+                let warning_title = if paste_dangerous { "Dangerous paste" } else { "Long paste" };
+                let warning_message =
+                    &format!("{}\n\nWould you like to continue?", if paste_dangerous { 
+                            format!("You are about to paste potentially dangerous text:\n{}", text_dialog)
+                        } else {
+                            format!("You are about to paste a lot of text ({} bytes)!", text_filtered.len())
+                        });
+                // Replace this with a different dialog/confirmation method if you wish
+                if !MessageDialog::new()
+                    .set_type(MessageType::Warning)
+                    .set_title(warning_title)
+                    .set_text(warning_message)
+                    .show_confirm()
+                    .unwrap() { return; }
+            }
+
             // In non-bracketed (ie: normal) mode, terminal applications cannot distinguish
             // pasted data from keystrokes.
             // In theory, we should construct the keystrokes needed to produce the data we are
             // pasting... since that's neither practical nor sensible (and probably an impossible
             // task to solve in a general way), we'll just replace line breaks (windows and unix
             // style) with a single carriage return (\r, which is what the Enter key produces).
-            self.write_to_pty(text.replace("\r\n", "\r").replace('\n', "\r").into_bytes());
+            self.write_to_pty(text_filtered.into_bytes());
         }
     }
 
